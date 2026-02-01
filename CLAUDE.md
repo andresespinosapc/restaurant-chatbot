@@ -48,12 +48,17 @@ Estamos trabajando con el siguiente workflow:
 ### Flujo de nodos
 
 ```
-Webhook Kapso → Guardar Mensaje → Obtener Historial → Agregar Historial → AI Agent → Enviar a Kapso → Guardar Respuesta
-      ↓                                                                       ↑
-Marcar Leído                                                      OpenRouter Chat Model
+Webhook Kapso → Guardar Mensaje → Obtener Historial → Agregar Historial → AI Agent → Agregar Teléfono → Preparar Mensaje → Es Reserva? → Enviar a Kapso → Guardar Respuesta
+      ↓                                                                       ↑                                                              ↓ (sí)
+Marcar Leído                                                      OpenRouter Chat Model                                              Guardar Reserva
 + Typing                                                          Get row(s) in sheet (tool)
-                                                                  Guardar Reserva en Sheets (tool)
 ```
+
+**Agregar Teléfono**: Set node que captura el teléfono del cliente desde el Webhook usando expresiones (no Code node, ver reglas n8n).
+
+**Preparar Mensaje**: Code node que parsea el output del AI Agent (puede venir con markdown ```json) y genera mensaje de confirmación templado para reservas.
+
+**Es Reserva?**: If node que bifurca el flujo para guardar en Google Sheets cuando `action === "book"`.
 
 ### Nodos
 
@@ -101,32 +106,53 @@ Marcar Leído                                                      OpenRouter Ch
 - **Modelo**: OpenRouter con `google/gemini-2.5-flash`
 - **Tools conectados**:
   - `Get row(s) in sheet in Google Sheets`: Lee reservas para verificar disponibilidad
-  - `Guardar Reserva en Sheets`: Guarda nuevas reservas confirmadas
+- **Output estructurado**: El agente responde con JSON que incluye `action` (reply/book/delivery/transfer_human)
+- **User prompt incluye**:
+  - Fecha y hora actual: `{{ $now.format('dddd, D [de] MMMM [de] YYYY, HH:mm', 'es') }}`
+  - Teléfono del cliente
+  - Historial de conversación (últimos 10 mensajes)
 
-#### 7. Enviar a Kapso
+#### 7. Agregar Teléfono
+- **Tipo**: `n8n-nodes-base.set`
+- **Función**: Captura el teléfono del cliente desde el Webhook y lo agrega al flujo de datos
+- **Por qué existe**: Los Code nodes no pueden usar `$('NodeName')` (causa timeout), así que capturamos el teléfono con un Set node que sí puede usar expresiones
+
+#### 8. Preparar Mensaje
+- **Tipo**: `n8n-nodes-base.code`
+- **Función**: Parsea el output del AI Agent y prepara el mensaje final
+- **Maneja**: Output con markdown (```json), genera mensaje templado para reservas
+- **Output**: `{ action, finalMessage, booking, transfer_reason, phone }`
+
+#### 9. Es Reserva?
+- **Tipo**: `n8n-nodes-base.if`
+- **Condición**: `action === "book"`
+- **Ramas**: Sí → Guardar Reserva → Enviar a Kapso, No → Enviar a Kapso directo
+
+#### 10. Enviar a Kapso
 - **Tipo**: `n8n-nodes-base.httpRequest`
-- **Función**: Envía la respuesta del AI Agent a WhatsApp via Kapso API
+- **Función**: Envía la respuesta al cliente via Kapso API
 - **URL**: `https://api.kapso.ai/meta/whatsapp/v24.0/932130583325746/messages`
-- **Body**: Usa `$json.output` del AI Agent
+- **Body**: Usa `finalMessage` de Preparar Mensaje
 
-#### 8. Guardar Respuesta
+#### 11. Guardar Respuesta
 - **Tipo**: `n8n-nodes-base.postgres`
 - **Función**: Persiste el mensaje de respuesta (outbound) en la base de datos
 - **Campos guardados**: Similar a Guardar Mensaje pero con `direction: 'outbound'`
 
-### Google Sheets Tools (AI Agent)
+### Google Sheets
 
-#### Get row(s) in sheet in Google Sheets
+#### Get row(s) in sheet (Tool del AI Agent)
 - **Tipo**: `n8n-nodes-base.googleSheetsTool`
 - **Operación**: read
 - **Función**: Lee las reservas existentes para verificar disponibilidad
 - **Google Sheet**: `1RUbMo37VJl2_c18lNUdXnzuNO1ATNiGcqyrHg_I_xbg`
 
-#### Guardar Reserva en Sheets
-- **Tipo**: `n8n-nodes-base.googleSheetsTool`
+#### Guardar Reserva (Nodo dedicado)
+- **Tipo**: `n8n-nodes-base.googleSheets`
 - **Operación**: append
-- **Función**: Guarda nuevas reservas confirmadas
+- **Función**: Guarda nuevas reservas cuando el AI Agent responde con `action: "book"`
 - **Columnas**: fecha, hora, personas, nombre, telefono, estado, fecha_reserva
+- **Nota**: Este nodo está fuera del AI Agent para tener control determinístico sobre el guardado
 
 ### AI Agent - System Prompt
 
@@ -147,19 +173,30 @@ El agente actúa como asistente virtual de **"Sabor Colombiano"**, un restaurant
 | INFO | "¿cuál es el horario?", "¿tienen parqueadero?" | Responder con info del restaurante |
 | HUMANO | "quiero hablar con alguien", "tengo una queja" | Transferir a asesor |
 
+**Validación de reservas:**
+El AI Agent valida antes de confirmar:
+1. **Fecha/hora en el futuro**: Si la hora ya pasó (ej: piden 11:00 pero son las 19:00), indica el error
+2. **Dentro del horario**: Lun-Jue 12-22h, Vie-Sab 12-23h, Dom 12-21h
+
 **Flujo de reservas:**
-1. Cliente menciona reserva → Consultar Google Sheet
+1. Cliente menciona reserva → AI Agent consulta Google Sheet (tool)
 2. Recopilar datos: fecha, hora, personas, nombre
-3. Confirmar y guardar usando tool "Guardar Reserva en Sheets"
-4. Responder con formato de confirmación
+3. **Validar fecha/hora** → Si inválida, pedir otra (action: "reply")
+4. Datos completos y válidos → AI Agent responde con `action: "book"` y objeto `booking`
+5. **Preparar Mensaje** genera mensaje de confirmación templado
+6. **Es Reserva?** detecta `action === "book"` y guarda en Google Sheets
+7. Se envía mensaje de confirmación al cliente
 
 ### Pendientes de implementar
 
 - [x] Enviar respuesta del AI Agent a WhatsApp via Kapso
 - [x] Guardar mensajes inbound/outbound en base de datos
-- [x] Guardar reservas en Google Sheets via tool
-- [ ] Parsear bloques `[INTERES_DOMICILIO]` y marcar en CRM
-- [ ] Parsear bloques `[TRANSFERIR_HUMANO]` y notificar/transferir
+- [x] Guardar reservas en Google Sheets (flujo determinístico con nodo dedicado)
+- [x] Mensaje de confirmación templado para reservas
+- [x] Validación de fecha/hora de reservas (futuro + horario del restaurante)
+- [x] Pasar fecha actual al AI Agent para contexto temporal
+- [ ] Manejar `action: "delivery"` y registrar interés en CRM
+- [ ] Manejar `action: "transfer_human"` y notificar/transferir
 
 ## Convenciones
 
@@ -191,26 +228,6 @@ fix: resolve infinite loop in AI Agent tool calls
 docs: update workflow architecture in CLAUDE.md
 chore: initialize git repository
 ```
-
-### n8n Workflows
-
-#### Postgres queryReplacement - Usar arrays, NO strings con comas
-
-**IMPORTANTE**: Siempre usar formato array para `queryReplacement` en nodos Postgres:
-
-```javascript
-// ❌ MAL - Si un valor contiene comas, rompe el parsing
-"={{ $json.id }}, {{ $json.name }}, {{ $json.content }}"
-
-// ✅ BIEN - Array maneja comas dentro de los valores correctamente
-"={{ [$json.id, $json.name, $json.content] }}"
-```
-
-#### Google Sheets Tools para AI Agent
-
-- Usar `n8n-nodes-base.googleSheetsTool` directamente conectado al AI Agent
-- Conexión: `ai_tool` → AI Agent
-- Para operación append, usar `mappingMode: "defineBelow"` con schema y value explícitos
 
 ### Base de datos
 
