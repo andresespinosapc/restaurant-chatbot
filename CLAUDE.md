@@ -138,7 +138,7 @@ Webhook Kapso → Guardar Mensaje → Esperar 3s → Verificar Ultimo 1 → Es U
 - **Modelo**: OpenRouter con `google/gemini-2.5-flash`
 - **Tools conectados**:
   - `Consultar Disponibilidad`: Sub-workflow para verificar disponibilidad de reservas
-- **Output estructurado**: El agente responde con JSON que incluye `action` (reply/book/delivery/transfer_human)
+- **Output estructurado**: El agente responde con JSON que incluye `action` (reply/book)
 - **User prompt incluye**:
   - Fecha y hora actual: `{{ $now.format('dddd, D [de] MMMM [de] YYYY, HH:mm', 'es') }}`
   - Teléfono del cliente
@@ -216,9 +216,8 @@ El agente actúa como asistente virtual de **"Sabor Colombiano"**, un restaurant
 | Intención | Ejemplos | Acción |
 |-----------|----------|--------|
 | RESERVA | "quiero reservar", "mesa para 4" | Consultar Google Sheet, recopilar datos, guardar con tool |
-| DOMICILIO | "quiero pedir", "hacen delivery" | Enviar enlaces de plataformas |
 | INFO | "¿cuál es el horario?", "¿tienen parqueadero?" | Responder con info del restaurante |
-| HUMANO | "quiero hablar con alguien", "tengo una queja" | Transferir a asesor |
+| HUMANO | "quiero hablar con alguien", "tengo una queja" | Responde que es un demo (no hay transferencia disponible) |
 
 **Validación de reservas:**
 El AI Agent valida antes de confirmar:
@@ -243,8 +242,7 @@ El AI Agent valida antes de confirmar:
 - [x] Validación de fecha/hora de reservas (futuro + horario del restaurante)
 - [x] Pasar fecha actual al AI Agent para contexto temporal
 - [x] Debounce para mensajes múltiples (esperar 3s + verificar último mensaje)
-- [ ] Manejar `action: "delivery"` y registrar interés en CRM
-- [ ] Manejar `action: "transfer_human"` y notificar/transferir
+- [x] Manejar solicitud de humano (modo demo: responde amablemente que no hay personal disponible)
 
 ## Convenciones
 
