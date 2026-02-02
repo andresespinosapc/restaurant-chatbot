@@ -48,17 +48,34 @@ Estamos trabajando con el siguiente workflow:
 ### Flujo de nodos
 
 ```
-Webhook Kapso → Guardar Mensaje → Obtener Historial → Agregar Historial → AI Agent → Agregar Teléfono → Preparar Mensaje → Es Reserva? → Enviar a Kapso → Guardar Respuesta
-      ↓                                                                       ↑                                                              ↓ (sí)
-Marcar Leído                                                      OpenRouter Chat Model                                              Guardar Reserva
-+ Typing                                                          Get row(s) in sheet (tool)
+Webhook Kapso → Guardar Mensaje → Esperar 3s → Verificar Ultimo 1 → Es Ultimo 1? → Obtener Historial → Agregar Historial → AI Agent → ...
+                                                                         ↓ No                              ↓ paralelo
+                                                                      (termina)                      Marcar Leído + Typing
+
+... → Agregar Teléfono → Preparar Mensaje → Es Reserva? → Guardar Reserva ─┬→ Verificar Ultimo 2 → Es Ultimo 2? → Enviar a Kapso → Guardar Respuesta
+                                                 ↓ No ─────────────────────┘                            ↓ No
+                                                                                                     (termina)
 ```
+
+**Debounce (mensajes múltiples)**: Cuando un usuario envía varios mensajes seguidos ("hola", "quiero", "reserva"), el workflow espera 3 segundos y verifica si hay mensajes más nuevos. Solo el último mensaje se procesa, evitando respuestas múltiples.
+
+**Doble verificación**: Se verifica si es el último mensaje en dos puntos:
+1. Después del debounce, antes de procesar con AI Agent
+2. Justo antes de enviar la respuesta a WhatsApp (por si llegaron mensajes mientras el AI procesaba)
 
 **Agregar Teléfono**: Set node que captura el teléfono del cliente desde el Webhook usando expresiones (no Code node, ver reglas n8n).
 
 **Preparar Mensaje**: Code node que parsea el output del AI Agent (puede venir con markdown ```json) y genera mensaje de confirmación templado para reservas.
 
 **Es Reserva?**: If node que bifurca el flujo para guardar en Google Sheets cuando `action === "book"`.
+
+### Sub-workflow: Verificar Último Mensaje
+
+- **ID**: `r5ALNmHLooCGfN9S`
+- **Función**: Verifica si el mensaje actual es el último del usuario (para debounce)
+- **Inputs**: `phone_number`, `message_id`
+- **Output**: `{ is_last: boolean }`
+- **Query**: Compara el `created_at` del mensaje con mensajes más recientes del mismo usuario
 
 ### Nodos
 
@@ -70,12 +87,7 @@ Marcar Leído                                                      OpenRouter Ch
   - Método: POST
   - Response Mode: `lastNode`
 
-#### 2. Marcar Leído + Typing
-- **Tipo**: `n8n-nodes-base.httpRequest`
-- **Función**: Marca el mensaje como leído y muestra indicador de escritura
-- **Ejecuta en paralelo** con Guardar Mensaje
-
-#### 3. Guardar Mensaje
+#### 2. Guardar Mensaje
 - **Tipo**: `n8n-nodes-base.postgres`
 - **Función**: Persiste cada mensaje entrante en la base de datos
 - **Query**: INSERT en `chatbot.messages` con ON CONFLICT para evitar duplicados
@@ -90,51 +102,86 @@ Marcar Leído                                                      OpenRouter Ch
   - `direction`: 'inbound' o 'outbound'
   - `raw_payload`: JSON completo del webhook
 
-#### 4. Obtener Historial
+#### 3. Esperar 3s (Debounce)
+- **Tipo**: `n8n-nodes-base.wait`
+- **Función**: Espera 3 segundos antes de continuar, permitiendo que lleguen más mensajes
+- **Configuración**: `amount: 3, unit: seconds`
+
+#### 4. Verificar Ultimo 1
+- **Tipo**: `n8n-nodes-base.executeWorkflow`
+- **Función**: Llama al sub-workflow para verificar si es el último mensaje
+- **Sub-workflow**: `r5ALNmHLooCGfN9S` (Verificar Último Mensaje)
+
+#### 5. Es Ultimo 1?
+- **Tipo**: `n8n-nodes-base.if`
+- **Condición**: `is_last === true`
+- **Ramas**: Sí → continúa al AI Agent, No → termina (otro mensaje más nuevo será procesado)
+
+#### 6. Obtener Historial
 - **Tipo**: `n8n-nodes-base.postgres`
 - **Función**: Recupera los últimos 10 mensajes del usuario actual
 - **Query**: SELECT de `chatbot.messages` filtrado por `phone_number`, ordenado por `created_at DESC`
 
-#### 5. Agregar Historial
+#### 7. Agregar Historial
 - **Tipo**: `n8n-nodes-base.aggregate`
 - **Función**: Combina todos los mensajes del historial en un solo item
 - **Por qué es necesario**: Sin este nodo, cada mensaje del historial se procesaría como un item separado
 
-#### 6. AI Agent
+#### 8. Marcar Leído + Typing
+- **Tipo**: `n8n-nodes-base.httpRequest`
+- **Función**: Marca el mensaje como leído y muestra indicador de escritura
+- **Ejecuta en paralelo** con AI Agent (después de Agregar Historial)
+
+#### 9. AI Agent
 - **Tipo**: `@n8n/n8n-nodes-langchain.agent`
 - **Versión**: 3.1
 - **Modelo**: OpenRouter con `google/gemini-2.5-flash`
 - **Tools conectados**:
-  - `Get row(s) in sheet in Google Sheets`: Lee reservas para verificar disponibilidad
+  - `Consultar Disponibilidad`: Sub-workflow para verificar disponibilidad de reservas
 - **Output estructurado**: El agente responde con JSON que incluye `action` (reply/book/delivery/transfer_human)
 - **User prompt incluye**:
   - Fecha y hora actual: `{{ $now.format('dddd, D [de] MMMM [de] YYYY, HH:mm', 'es') }}`
   - Teléfono del cliente
   - Historial de conversación (últimos 10 mensajes)
 
-#### 7. Agregar Teléfono
+#### 10. Agregar Teléfono
 - **Tipo**: `n8n-nodes-base.set`
 - **Función**: Captura el teléfono del cliente desde el Webhook y lo agrega al flujo de datos
 - **Por qué existe**: Los Code nodes no pueden usar `$('NodeName')` (causa timeout), así que capturamos el teléfono con un Set node que sí puede usar expresiones
 
-#### 8. Preparar Mensaje
+#### 11. Preparar Mensaje
 - **Tipo**: `n8n-nodes-base.code`
 - **Función**: Parsea el output del AI Agent y prepara el mensaje final
 - **Maneja**: Output con markdown (```json), genera mensaje templado para reservas
 - **Output**: `{ action, finalMessage, booking, transfer_reason, phone }`
 
-#### 9. Es Reserva?
+#### 12. Es Reserva?
 - **Tipo**: `n8n-nodes-base.if`
 - **Condición**: `action === "book"`
-- **Ramas**: Sí → Guardar Reserva → Enviar a Kapso, No → Enviar a Kapso directo
+- **Ramas**: Sí → Guardar Reserva, No → Verificar Ultimo 2
 
-#### 10. Enviar a Kapso
+#### 13. Guardar Reserva
+- **Tipo**: `n8n-nodes-base.googleSheets`
+- **Función**: Guarda la reserva en Google Sheets
+- **Siguiente**: Verificar Ultimo 2
+
+#### 14. Verificar Ultimo 2
+- **Tipo**: `n8n-nodes-base.executeWorkflow`
+- **Función**: Segunda verificación antes de enviar respuesta (por si llegaron mensajes mientras el AI procesaba)
+- **Sub-workflow**: `r5ALNmHLooCGfN9S` (Verificar Último Mensaje)
+
+#### 15. Es Ultimo 2?
+- **Tipo**: `n8n-nodes-base.if`
+- **Condición**: `is_last === true`
+- **Ramas**: Sí → Enviar a Kapso, No → termina (no enviar respuesta obsoleta)
+
+#### 16. Enviar a Kapso
 - **Tipo**: `n8n-nodes-base.httpRequest`
 - **Función**: Envía la respuesta al cliente via Kapso API
 - **URL**: `https://api.kapso.ai/meta/whatsapp/v24.0/932130583325746/messages`
 - **Body**: Usa `finalMessage` de Preparar Mensaje
 
-#### 11. Guardar Respuesta
+#### 17. Guardar Respuesta
 - **Tipo**: `n8n-nodes-base.postgres`
 - **Función**: Persiste el mensaje de respuesta (outbound) en la base de datos
 - **Campos guardados**: Similar a Guardar Mensaje pero con `direction: 'outbound'`
@@ -195,6 +242,7 @@ El AI Agent valida antes de confirmar:
 - [x] Mensaje de confirmación templado para reservas
 - [x] Validación de fecha/hora de reservas (futuro + horario del restaurante)
 - [x] Pasar fecha actual al AI Agent para contexto temporal
+- [x] Debounce para mensajes múltiples (esperar 3s + verificar último mensaje)
 - [ ] Manejar `action: "delivery"` y registrar interés en CRM
 - [ ] Manejar `action: "transfer_human"` y notificar/transferir
 
