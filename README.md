@@ -1,44 +1,46 @@
 # Restaurant Chatbot
 
-Chatbot de WhatsApp para **"Sabor Colombiano"**, un restaurante de comida típica colombiana. Construido con n8n y la API de Kapso.
+> **Note:** "Sabor Colombiano" is a fictional restaurant created for demonstration purposes.
 
-## Funcionalidades
+WhatsApp chatbot for **"Sabor Colombiano"**, a traditional Colombian cuisine restaurant. Built with n8n and the Kapso API.
 
-- **Reservas**: Los clientes pueden hacer reservas de mesa por WhatsApp
-- **Consultas**: Información sobre menú, horarios, ubicación y métodos de pago
-- **Domicilios**: Enlaces a plataformas de delivery (Rappi, Uber Eats)
-- **Transferencia a humano**: Escala a un asesor cuando es necesario
+## Features
 
-## Arquitectura
+- **Reservations**: Customers can book a table via WhatsApp
+- **Inquiries**: Information about the menu, hours, location, and payment methods
+- **Delivery**: Links to delivery platforms (Rappi, Uber Eats)
+- **Human handoff**: Escalates to a live agent when needed
+
+## Architecture
 
 ```
-WhatsApp → Kapso → n8n Workflow → AI Agent (Gemini) → Respuesta al cliente
+WhatsApp → Kapso → n8n Workflow → AI Agent (Gemini) → Response to customer
                         ↓
-                   PostgreSQL (historial)
-                   Google Sheets (reservas)
+                   PostgreSQL (message history)
+                   Google Sheets (reservations)
 ```
 
-### Flujo del workflow
+### Workflow
 
-1. Webhook recibe mensaje de WhatsApp via Kapso
-2. Mensaje se guarda en PostgreSQL
-3. Debounce de 3 segundos para mensajes múltiples
-4. AI Agent procesa el mensaje con contexto del historial
-5. Si es reserva, se guarda en Google Sheets
-6. Respuesta se envía al cliente via Kapso
+1. Webhook receives a WhatsApp message via Kapso
+2. Message is saved to PostgreSQL
+3. 3-second debounce for multiple rapid messages
+4. AI Agent processes the message with conversation history context
+5. If it's a reservation, it's saved to Google Sheets
+6. Response is sent to the customer via Kapso
 
 ## Stack
 
-- **n8n**: Orquestación del workflow
-- **Kapso**: API de WhatsApp Business
-- **OpenRouter + Gemini 2.5 Flash**: Modelo de lenguaje
-- **PostgreSQL**: Persistencia de mensajes
-- **Google Sheets**: Registro de reservas
+- **n8n**: Workflow orchestration
+- **Kapso**: WhatsApp Business API
+- **OpenRouter + Gemini 2.5 Flash**: Language model
+- **PostgreSQL**: Message persistence
+- **Google Sheets**: Reservation records
 
-## Configuración
+## Setup
 
-Variables de entorno requeridas:
-- `KAPSO_API_KEY`: API key de Kapso
+Required environment variables:
+- `KAPSO_API_KEY`: Kapso API key
 
 ## License
 
